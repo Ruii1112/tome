@@ -9,7 +9,7 @@ sequenceDiagram
     participant OCR as OCR API (AWS)
     participant DB as Database
 
-    Frontend->>Backend: POST /api/ocr/upload（PDFファイル3枚をアップロード）
+    Frontend->>Backend: POST /api/ocr/upload (PDFファイル3枚をアップロード)
     Backend->>Backend: uploadId を生成（例: xyz123）
 
     Backend->>Thread1: スレッドで file1.pdf のOCR処理を開始
@@ -18,19 +18,19 @@ sequenceDiagram
 
     Backend-->>Frontend: { uploadId: "xyz123" } を返却
 
-    Note over Backend,Thread1,Thread2,Thread3: ExecutorService によりスレッドを並列起動
+    Note over Backend,Thread3: ExecutorService によりスレッドを並列起動
 
     Thread1->>OCR: POST /ocr (file1.pdf)
     Thread2->>OCR: POST /ocr (file2.pdf)
     Thread3->>OCR: POST /ocr (file3.pdf)
 
-    OCR-->>Thread1: OCR結果（text1）
-    OCR-->>Thread2: OCR結果（text2）
-    OCR-->>Thread3: OCR結果（text3）
+    OCR-->>Thread1: OCR結果 (text1)
+    OCR-->>Thread2: OCR結果 (text2)
+    OCR-->>Thread3: OCR結果 (text3)
 
-    Thread1->>DB: INSERT INTO ocr_result（file1, status=READY）
-    Thread2->>DB: INSERT INTO ocr_result（file2, status=READY）
-    Thread3->>DB: INSERT INTO ocr_result（file3, status=READY）
+    Thread1->>DB: INSERT INTO ocr_result (file1, status=READY)
+    Thread2->>DB: INSERT INTO ocr_result (file2, status=READY)
+    Thread3->>DB: INSERT INTO ocr_result (file3, status=READY)
 
     loop 数秒ごとに結果確認（ポーリング）
         Frontend->>Backend: GET /api/ocr/results?uploadId=xyz123
