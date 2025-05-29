@@ -38,6 +38,13 @@ sequenceDiagram
         DB-->>Backend: 検索結果（各ファイルのstatus, text）
         Backend-->>Frontend: JSONで結果を返す
     end
+
+    alt 1件取得リクエスト
+        Frontend->>Backend: GET /api/ocr/result (id=123 フォームで送信)
+        Backend->>DB: ocr_result テーブルから id=123 を検索
+        DB-->>Backend: レコード詳細 (fileName, status, text)
+        Backend-->>Frontend: JSONで1件のOCR結果を返却
+    end
 ```
 
 ### Action
@@ -61,15 +68,19 @@ import your.package.form.OcrUploadForm;
 public class OcrAction {
 
     @Resource
-    public OcrService ocrService;
+    private OcrService ocrService;
 
     public OcrUploadForm ocrUploadForm;
 
     @Execute(validator = false)
     public String upload() {
-        String uploadId = ocrService.handleUpload(ocrUploadForm.files);
-        // JSONで返す
-        return "{\"uploadId\": \"" + uploadId + "\"}";
+        String uploadId = UUID.randomUUID().toString(); // リクエストをグルーピングするための一意のid
+        List<Integer> recordIds = ocrService.handleUpload(uploadId, ocrUploadForm.files);
+
+        Map<String, Object> response = new HashMap<>();
+        response.put("uploadId", uploadId);
+        response.put("recordIds", recordIds);
+        return toJson(response);
     }
 
     @Execute(validator = false)
@@ -79,8 +90,28 @@ public class OcrAction {
         return toJson(results);  // Jacksonなどを使ってJSONに変換
     }
 
+    @Execute(validator = false)
+    public String result() {
+        String idStr = ocrResultForm.id;
+        if (idStr == null || idStr.isEmpty()) {
+            リクエストで何もなかったら、400返す
+            return toJson(Collections.singletonMap("error", "id is required"));
+        }
+
+        try {
+            int id = Integer.parseInt(idStr);
+            OcrResultDto dto = ocrService.getResult(id);
+            if (dto == null) {
+                return toJson(Collections.singletonMap("error", "Not found"));
+            }
+            return toJson(dto);
+        } catch (NumberFormatException e) {
+            return toJson(Collections.singletonMap("error", "Invalid id format"));
+        }
+    }
+
+
     private String toJson(Object obj) {
-        // 例: ObjectMapper を使ってJSONに変換
         try {
             return new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(obj);
         } catch (Exception e) {
@@ -100,6 +131,7 @@ import org.apache.struts.upload.FormFile;
 
 public class OcrUploadForm {
     public List<FormFile> files;
+    public String id;
     public String uploadId;
 }
 ```
@@ -125,42 +157,47 @@ public class OcrService {
     @Resource
     public OcrResultDao ocrResultDao;
 
-    private ExecutorService executor = Executors.newFixedThreadPool(3);
+    private ExecutorService executor = Executors.newFixedThreadPool(3); // スレッド数を3に
 
-    public String handleUpload(List<FormFile> files) {
-        String uploadId = UUID.randomUUID().toString();
+    public List<Integer> handleUpload(String uploadId, List<FormFile> files) {
+        List<Integer> recordIds = new ArrayList<>();
 
         for (FormFile file : files) {
+            // まずDBに空のレコードをinsertしてidを取得
+            OcrResult result = new OcrResult();
+            result.uploadId = uploadId;
+            result.fileName = file.getFileName();
+            result.status = "PROCESSING";
+            result.createdAt = new Date();
+
+            int insertedId = ocrResultDao.insert(result);  // insertでDBの主キーIDが返る想定
+            recordIds.add(insertedId);
+
+            byte[] fileBytes = IOUtils.toByteArray(file.getInputStream());
+            // 非同期処理
             executor.submit(() -> {
                 try {
-                    byte[] fileBytes = IOUtils.toByteArray(file.getInputStream());
-
-                    // OCRリクエスト送信
                     String text = callOcrApi(fileBytes);
 
-                    // 結果を保存
-                    OcrResult result = new OcrResult();
-                    result.uploadId = uploadId;
-                    result.fileName = file.getFileName();
-                    result.text = text;
-                    result.status = "READY";
-                    result.createdAt = new Date();
-                    ocrResultDao.insert(result);
+                    // update処理（insert時のIDでレコード特定）
+                    OcrResult updateResult = new OcrResult();
+                    updateResult.id = insertedId;
+                    updateResult.text = text;
+                    updateResult.status = "READY";
+                    ocrResultDao.update(updateResult);
+
                 } catch (Exception e) {
-                    // エラー処理（status=FAILED で保存）
-                    OcrResult result = new OcrResult();
-                    result.uploadId = uploadId;
-                    result.fileName = file.getFileName();
-                    result.text = "";
-                    result.status = "FAILED";
-                    result.createdAt = new Date();
-                    ocrResultDao.insert(result);
+                    OcrResult failResult = new OcrResult();
+                    failResult.id = insertedId;
+                    failResult.text = "";
+                    failResult.status = "FAILED";
+                    ocrResultDao.update(failResult);
                 }
             });
         }
-
-        return uploadId;
+        return recordIds;
     }
+
 
     public List<OcrResultDto> getResults(String uploadId) {
         List<OcrResult> entities = ocrResultDao.findByUploadId(uploadId);
@@ -172,6 +209,18 @@ public class OcrService {
             return dto;
         }).collect(Collectors.toList());
     }
+
+    public OcrResultDto getResult(int id) {
+        OcrResult entity = ocrResultDao.findById(id);
+        if (entity == null) return null;
+
+        OcrResultDto dto = new OcrResultDto();
+        dto.fileName = entity.fileName;
+        dto.status = entity.status;
+        dto.text = entity.text;
+        return dto;
+    }
+
 
     private String callOcrApi(byte[] fileBytes) {
         // OCR API へのHTTPリクエスト処理（例: OkHttp や Apache HttpClient）
@@ -201,6 +250,7 @@ package your.package.entity;
 import java.util.Date;
 
 public class OcrResult {
+    public Integer id;
     public String uploadId;
     public String fileName;
     public String text;
@@ -218,5 +268,7 @@ import your.package.entity.OcrResult;
 public interface OcrResultDao {
     List<OcrResult> findByUploadId(String uploadId);
     int insert(OcrResult entity);
+    int update(OcrResult entity);
+    OcrResult findById(int id);
 }
 ```
